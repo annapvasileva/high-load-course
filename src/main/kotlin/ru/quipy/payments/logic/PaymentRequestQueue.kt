@@ -3,6 +3,11 @@ package ru.quipy.payments.logic
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import java.time.Duration
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.Semaphore
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class PaymentRequestQueue(
     name: String,
@@ -17,15 +22,7 @@ class PaymentRequestQueue(
 
     private val queue = ArrayBlockingQueue<PaymentTask>(queueCapacity)
 
-    @Volatile
-    private var running = true
-
-    private val workers: List<Thread> = (0 until parallelRequests).map { idx ->
-        Thread({ workerLoop() }, "payment-$name-worker-$idx").apply {
-            isDaemon = true
-            start()
-        }
-    }
+    public fun pendingRequests(): Int { return queue.size }
 
     fun submit(task: PaymentTask) {
         if (!queue.offer(task)) {
@@ -34,14 +31,25 @@ class PaymentRequestQueue(
         }
     }
 
-    fun pendingRequests(): Int = queue.size
+    @Volatile
+    private var running = true
 
-    fun shutdown() {
-        running = false
-        workers.forEach { it.interrupt() }
+    private val slots = Semaphore(parallelRequests)
+
+    private val dispatcher = Thread(::dispatcherLoop, "payment-$name-dispatcher").apply {
+        isDaemon = true
+        start()
     }
 
-    private fun workerLoop() {
+    private val executor = ThreadPoolExecutor(
+        parallelRequests, parallelRequests,
+        0L, TimeUnit.MILLISECONDS,
+        SynchronousQueue(),
+        { r -> Thread(r, "payment-$name-worker").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy()
+    )
+
+    private fun dispatcherLoop() {
         while (running) {
             val task = try {
                 queue.take()
@@ -49,21 +57,37 @@ class PaymentRequestQueue(
                 Thread.currentThread().interrupt()
                 return
             }
-
-            processTask(task)
+            dispatch(task)
         }
     }
 
-    private fun processTask(task: PaymentTask) {
-        val now = System.currentTimeMillis()
-        val maxWait = Duration.ofMillis(task.deadline - now)
-            .minus(averageProcessingTime)
-
-        if (!limiter.tickBlocking(maxWait)) {
-            onReject(task, "Could not acquire rate limit slot before deadline ${task.deadline} (now: $now)")
+    private fun dispatch(task: PaymentTask) {
+        try {
+            slots.acquire()
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
             return
         }
 
-        onExecute(task)
+        val now = System.currentTimeMillis()
+        val maxWait = Duration.ofMillis(task.deadline - now).minus(averageProcessingTime)
+
+        if (!limiter.tickBlocking(maxWait)) {
+            onReject(task, "no rate limit slot before deadline ${task.deadline} (now: $now)")
+            return
+        }
+
+        try {
+            executor.execute {
+                try {
+                    onExecute(task)
+                } finally {
+                    slots.release()
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            slots.release()
+            onReject(task, "executor is shut down")
+        }
     }
 }
