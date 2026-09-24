@@ -74,6 +74,7 @@ class PaymentRequestQueue(
 
         if (!limiter.tickBlocking(maxWait)) {
             onReject(task, "no rate limit slot before deadline ${task.deadline} (now: $now)")
+            slots.release()
             return
         }
 
