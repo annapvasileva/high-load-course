@@ -22,8 +22,16 @@ class PaymentSystemImpl(
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
-        for (account in paymentAccounts) {
-            account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
+        val account = paymentAccounts
+            .asSequence()
+            .filter { it.isEnabled() }
+            .minByOrNull { it.pendingRequests() }
+
+        if (account == null) {
+            logger.error("No enabled accounts for payment $paymentId")
+            return
         }
+
+        account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
     }
 }
