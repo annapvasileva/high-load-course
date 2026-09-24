@@ -43,12 +43,12 @@ class SlidingWindowRateLimiter(
         val timeoutMs = timeout.toMillis()
 
         val start = System.currentTimeMillis()
-        while (true) {
-            if (tick()) return true
+        while (!tick()) {
             val left = timeoutMs - (System.currentTimeMillis() - start)
             if (left <= 0) return false
             Thread.sleep(minOf(10L, left))
         }
+        return true
     }
 
     data class Measure(
