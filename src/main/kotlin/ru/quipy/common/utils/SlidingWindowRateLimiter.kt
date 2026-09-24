@@ -10,8 +10,6 @@ import java.time.Duration
 import java.util.concurrent.Executors
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 class SlidingWindowRateLimiter(
     private val rate: Long,
@@ -37,6 +35,21 @@ class SlidingWindowRateLimiter(
         while (!tick()) {
             Thread.sleep(10)
         }
+    }
+
+    fun tickBlocking(timeout: Duration): Boolean {
+        val timeoutMs = timeout.toMillis()
+        if (timeoutMs < 0) {
+            return false
+        }
+
+        val start = System.currentTimeMillis()
+        while (!tick()) {
+            val left = timeoutMs - (System.currentTimeMillis() - start)
+            if (left <= 0) return false
+            Thread.sleep(minOf(10L, left))
+        }
+        return true
     }
 
     data class Measure(
