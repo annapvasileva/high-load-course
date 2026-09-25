@@ -10,10 +10,8 @@ import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
-import java.util.*
+import java.util.UUID
 
-
-// Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
@@ -36,6 +34,17 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder().build()
 
+    private val capacityMultiplier = 1000
+    private val requestQueue = PaymentRequestQueue(
+        name = accountName,
+        parallelRequests = parallelRequests,
+        rateLimitPerSec = rateLimitPerSec,
+        queueCapacity = rateLimitPerSec * capacityMultiplier,
+        averageProcessingTime = requestAverageProcessingTime,
+        onExecute = ::processPayment,
+        onReject = ::rejectPayment,
+    )
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
@@ -48,6 +57,29 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
+
+        requestQueue.submit(
+            PaymentTask(
+                paymentId = paymentId,
+                amount = amount,
+                paymentStartedAt = paymentStartedAt,
+                deadline = deadline,
+                transactionId = transactionId,
+            )
+        )
+    }
+
+    private fun rejectPayment(task: PaymentTask, reason: String) {
+        logger.warn("[$accountName] Rejected payment ${task.paymentId}, txId: ${task.transactionId}, reason: $reason")
+        paymentESService.update(task.paymentId) {
+            it.logProcessing(false, now(), task.transactionId, reason = reason)
+        }
+    }
+
+    private fun processPayment(task: PaymentTask) {
+        val paymentId = task.paymentId
+        val transactionId = task.transactionId
+        val amount = task.amount
 
         try {
             val request = Request.Builder().run {
@@ -91,12 +123,13 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
+    override fun pendingRequests(): Int = requestQueue.pendingRequests()
+
     override fun price() = properties.price
 
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
-
 }
 
 public fun now() = System.currentTimeMillis()
