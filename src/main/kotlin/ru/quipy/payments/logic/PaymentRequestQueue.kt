@@ -73,8 +73,11 @@ class PaymentRequestQueue(
         val maxWait = Duration.ofMillis(task.deadline - now).minus(averageProcessingTime)
 
         if (!limiter.tickBlocking(maxWait)) {
-            onReject(task, "no rate limit slot before deadline ${task.deadline} (now: $now)")
-            slots.release()
+            try {
+                onReject(task, "no rate limit slot before deadline ${task.deadline} (now: $now)")
+            } finally {
+                slots.release()
+            }
             return
         }
 
