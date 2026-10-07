@@ -92,7 +92,7 @@ class PaymentRequestQueue(
         }
 
         val now = System.currentTimeMillis()
-        val maxWait = Duration.ofMillis(task.deadline - now).minus(averageProcessingTime)
+        val maxWait = Duration.ofMillis(task.deadline - now).minus(averageProcessingTime.multipliedBy(3))
 
         if (!limiter.tickBlocking(maxWait)) {
             try {
