@@ -20,11 +20,27 @@ class PaymentRequestQueue(
 ) {
     private val limiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
 
+    private val throughputPerSec: Double = minOf(
+        rateLimitPerSec.toDouble(),
+        parallelRequests * 1000.0 / averageProcessingTime.toMillis(),
+    )
+
     private val queue = ArrayBlockingQueue<PaymentTask>(queueCapacity)
 
     public fun pendingRequests(): Int { return queue.size }
 
     fun submit(task: PaymentTask) {
+        val now = System.currentTimeMillis()
+        val processingTimeMillis = task.deadline - now
+        val n = processingTimeMillis / 1000.0 * throughputPerSec
+        if (queue.size >= n) {
+            onReject(
+                task,
+                "queue ahead ${queue.size} >= N=$n (v=$throughputPerSec) before deadline ${task.deadline} (now: $now)",
+            )
+            return
+        }
+
         if (!queue.offer(task)) {
             onReject(task, "Payment queue overflow")
             return
