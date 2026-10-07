@@ -49,7 +49,8 @@ class PaymentExternalSystemAdapterImpl(
 
     private val incomingCounter = counter("incoming")
     private val outgoingCounter = counter("outgoing")
-    private val rejectedCounter = counter("rejected")
+    private val rejectedEnqueueCounter = counter("rejected_enqueue")
+    private val rejectedDispatchCounter = counter("rejected_dispatch")
 
     private fun counter(type: String) =
         meterRegistry.counter(
@@ -83,9 +84,15 @@ class PaymentExternalSystemAdapterImpl(
         )
     }
 
-    private fun rejectPayment(task: PaymentTask, reason: String) {
-        rejectedCounter.increment()
-        logger.warn("[$accountName] Rejected payment ${task.paymentId}, txId: ${task.transactionId}, reason: $reason")
+    private fun rejectPayment(task: PaymentTask, reason: String, phase: PaymentRejectPhase) {
+        when (phase) {
+            PaymentRejectPhase.ENQUEUE -> rejectedEnqueueCounter.increment()
+            PaymentRejectPhase.DISPATCH -> rejectedDispatchCounter.increment()
+        }
+        logger.warn(
+            "[$accountName] Rejected payment ${task.paymentId}, txId: ${task.transactionId}, " +
+                "phase: $phase, reason: $reason",
+        )
         paymentESService.update(task.paymentId) {
             it.logProcessing(false, now(), task.transactionId, reason = reason)
         }

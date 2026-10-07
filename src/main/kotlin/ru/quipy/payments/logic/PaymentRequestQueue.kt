@@ -9,6 +9,11 @@ import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
+enum class PaymentRejectPhase {
+    ENQUEUE,
+    DISPATCH,
+}
+
 class PaymentRequestQueue(
     name: String,
     rateLimitPerSec: Int,
@@ -16,7 +21,7 @@ class PaymentRequestQueue(
     queueCapacity: Int,
     private val averageProcessingTime: Duration,
     private val onExecute: (PaymentTask) -> Unit,
-    private val onReject: (PaymentTask, String) -> Unit,
+    private val onReject: (PaymentTask, String, PaymentRejectPhase) -> Unit,
 ) {
     private val limiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
 
@@ -37,12 +42,13 @@ class PaymentRequestQueue(
             onReject(
                 task,
                 "queue ahead ${queue.size} >= N=$n (v=$throughputPerSec) before deadline ${task.deadline} (now: $now)",
+                PaymentRejectPhase.ENQUEUE,
             )
             return
         }
 
         if (!queue.offer(task)) {
-            onReject(task, "Payment queue overflow")
+            onReject(task, "Payment queue overflow", PaymentRejectPhase.ENQUEUE)
             return
         }
     }
@@ -90,7 +96,11 @@ class PaymentRequestQueue(
 
         if (!limiter.tickBlocking(maxWait)) {
             try {
-                onReject(task, "no rate limit slot before deadline ${task.deadline} (now: $now)")
+                onReject(
+                    task,
+                    "no rate limit slot before deadline ${task.deadline} (now: $now)",
+                    PaymentRejectPhase.DISPATCH,
+                )
             } finally {
                 slots.release()
             }
@@ -107,7 +117,7 @@ class PaymentRequestQueue(
             }
         } catch (e: RejectedExecutionException) {
             slots.release()
-            onReject(task, "executor is shut down")
+            onReject(task, "executor is shut down", PaymentRejectPhase.DISPATCH)
         }
     }
 }
