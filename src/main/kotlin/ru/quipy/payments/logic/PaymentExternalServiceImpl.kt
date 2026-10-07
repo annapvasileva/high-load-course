@@ -2,6 +2,7 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.MeterRegistry
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -17,6 +18,7 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
+    private val meterRegistry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
 
     companion object {
@@ -45,8 +47,20 @@ class PaymentExternalSystemAdapterImpl(
         onReject = ::rejectPayment,
     )
 
+    private val incomingCounter = counter("incoming")
+    private val outgoingCounter = counter("outgoing")
+    private val rejectedCounter = counter("rejected")
+
+    private fun counter(type: String) =
+        meterRegistry.counter(
+            "payment_sys_requests",
+            "account", accountName,
+            "type", type,
+        )
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
+        incomingCounter.increment()
 
         val transactionId = UUID.randomUUID()
 
@@ -70,6 +84,7 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private fun rejectPayment(task: PaymentTask, reason: String) {
+        rejectedCounter.increment()
         logger.warn("[$accountName] Rejected payment ${task.paymentId}, txId: ${task.transactionId}, reason: $reason")
         paymentESService.update(task.paymentId) {
             it.logProcessing(false, now(), task.transactionId, reason = reason)
@@ -80,6 +95,7 @@ class PaymentExternalSystemAdapterImpl(
         val paymentId = task.paymentId
         val transactionId = task.transactionId
         val amount = task.amount
+        outgoingCounter.increment()
 
         try {
             val request = Request.Builder().run {
