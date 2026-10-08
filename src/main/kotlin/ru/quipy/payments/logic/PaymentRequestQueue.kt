@@ -1,5 +1,7 @@
 package ru.quipy.payments.logic
 
+import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.SlidingQuantile
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import java.time.Duration
 import java.util.concurrent.ArrayBlockingQueue
@@ -23,6 +25,10 @@ class PaymentRequestQueue(
     private val onExecute: (PaymentTask) -> Unit,
     private val onReject: (PaymentTask, String, PaymentRejectPhase) -> Unit,
 ) {
+    companion object {
+        val logger = LoggerFactory.getLogger(PaymentSystemImpl::class.java)
+    }
+
     private val limiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
 
     private val throughputPerSec: Double = minOf(
@@ -32,13 +38,19 @@ class PaymentRequestQueue(
 
     private val queue = ArrayBlockingQueue<PaymentTask>(queueCapacity)
 
+    private val slidingQuantile = SlidingQuantile(
+        windowSize  = 1000,
+        bucketWidth = averageProcessingTime.toMillis() / 3,
+        numBuckets  = 30
+    )
+
     public fun pendingRequests(): Int { return queue.size }
 
     fun submit(task: PaymentTask) {
         val now = System.currentTimeMillis()
         val processingTimeMillis = task.deadline - now
         val n = processingTimeMillis / 1000.0 * throughputPerSec
-        if (queue.size >= n) {
+        if (queue.size >= n * 10000) {
             onReject(
                 task,
                 "queue ahead ${queue.size} >= N=$n (v=$throughputPerSec) before deadline ${task.deadline} (now: $now)",
@@ -92,7 +104,8 @@ class PaymentRequestQueue(
         }
 
         val now = System.currentTimeMillis()
-        val maxWait = Duration.ofMillis(task.deadline - now).minus(averageProcessingTime.multipliedBy(3).dividedBy(2))
+        logger.info("Q: ${slidingQuantile.quantile(0.97)} - BS: ${averageProcessingTime.toMillis() / 4} - Last: ${slidingQuantile.quantile(1.0)}")
+        val maxWait = Duration.ofMillis(task.deadline - now - slidingQuantile.quantile(0.97))
 
         if (!limiter.tickBlocking(maxWait)) {
             try {
@@ -110,7 +123,9 @@ class PaymentRequestQueue(
         try {
             executor.execute {
                 try {
+                    val before = System.currentTimeMillis()
                     onExecute(task)
+                    slidingQuantile.add(System.currentTimeMillis() - before)
                 } finally {
                     slots.release()
                 }
