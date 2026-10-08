@@ -42,6 +42,7 @@ class PaymentExternalSystemAdapterImpl(
         parallelRequests = parallelRequests,
         rateLimitPerSec = rateLimitPerSec,
         queueCapacity = rateLimitPerSec * capacityMultiplier,
+        meterRegistry = meterRegistry,
         averageProcessingTime = requestAverageProcessingTime,
         onExecute = ::processPayment,
         onReject = ::rejectPayment,

@@ -1,15 +1,12 @@
 package ru.quipy.payments.logic
 
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.SlidingQuantile
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import java.time.Duration
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.Semaphore
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.*
 
 enum class PaymentRejectPhase {
     ENQUEUE,
@@ -21,6 +18,7 @@ class PaymentRequestQueue(
     rateLimitPerSec: Int,
     parallelRequests: Int,
     queueCapacity: Int,
+    private val meterRegistry: MeterRegistry,
     private val averageProcessingTime: Duration,
     private val onExecute: (PaymentTask) -> Unit,
     private val onReject: (PaymentTask, String, PaymentRejectPhase) -> Unit,
@@ -38,10 +36,14 @@ class PaymentRequestQueue(
 
     private val queue = ArrayBlockingQueue<PaymentTask>(queueCapacity)
 
+    private val queueSizeMetric = Gauge.builder("payment_request_queue_size") { queue.size.toDouble() }
+        .tags("account", name)
+        .register(meterRegistry);
+
     private val slidingQuantile = SlidingQuantile(
-        windowSize  = 1000,
+        windowSize = 1000,
         bucketWidth = averageProcessingTime.toMillis() / 3,
-        numBuckets  = 30
+        numBuckets = 30
     )
 
     public fun pendingRequests(): Int { return queue.size }
