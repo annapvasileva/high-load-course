@@ -85,17 +85,56 @@ class PaymentExternalSystemAdapterImpl(
         )
     }
 
-    private fun rejectPayment(task: PaymentTask, reason: String, phase: PaymentRejectPhase) {
+    private fun rejectPayment(
+        task: PaymentTask,
+        reason: String,
+        phase: PaymentRejectPhase,
+    ) {
         when (phase) {
-            PaymentRejectPhase.ENQUEUE -> rejectedEnqueueCounter.increment()
-            PaymentRejectPhase.DISPATCH -> rejectedDispatchCounter.increment()
+            PaymentRejectPhase.ENQUEUE ->
+                rejectedEnqueueCounter.increment()
+
+            PaymentRejectPhase.DISPATCH ->
+                rejectedDispatchCounter.increment()
         }
+
         logger.warn(
-            "[$accountName] Rejected payment ${task.paymentId}, txId: ${task.transactionId}, " +
-                "phase: $phase, reason: $reason",
+            "[$accountName] Rejected payment ${task.paymentId}, " +
+                    "txId: ${task.transactionId}, phase: $phase, " +
+                    "reason: $reason"
         )
+
         paymentESService.update(task.paymentId) {
-            it.logProcessing(false, now(), task.transactionId, reason = reason)
+            it.logProcessing(
+                false,
+                now(),
+                task.transactionId,
+                reason = reason,
+            )
+        }
+    }
+
+    private fun recordProcessingResult(
+        task: PaymentTask,
+        success: Boolean,
+        reason: String?,
+    ) {
+        try {
+            paymentESService.update(task.paymentId) {
+                it.logProcessing(
+                    success,
+                    now(),
+                    task.transactionId,
+                    reason = reason,
+                )
+            }
+        } catch (e: Exception) {
+            logger.error(
+                "[$accountName] Failed to persist payment result: " +
+                        "payment=${task.paymentId}, " +
+                        "txId=${task.transactionId}, success=$success",
+                e,
+            )
         }
     }
 
@@ -105,49 +144,81 @@ class PaymentExternalSystemAdapterImpl(
         val amount = task.amount
         outgoingCounter.increment()
 
-        try {
-            val request = Request.Builder().run {
-                url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-                post(emptyBody)
-            }.build()
+        val result: ExternalSysResponse = try {
+            val request = Request.Builder()
+                .url(
+                    "http://$paymentProviderHostPort/external/process" +
+                            "?serviceName=$serviceName" +
+                            "&token=$token" +
+                            "&accountName=$accountName" +
+                            "&transactionId=$transactionId" +
+                            "&paymentId=$paymentId" +
+                            "&amount=$amount"
+                )
+                .post(emptyBody)
+                .build()
 
             client.newCall(request).execute().use { response ->
-                val body = try {
-                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                val responseText = response.body?.string()
+
+                try {
+                    mapper.readValue(
+                        responseText,
+                        ExternalSysResponse::class.java,
+                    )
                 } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                    ExternalSysResponse(transactionId.toString(), paymentId.toString(),false, e.message)
-                }
+                    logger.error(
+                        "[$accountName] Invalid provider response: " +
+                                "txId=$transactionId, " +
+                                "HTTP ${response.code}, body=$responseText",
+                        e,
+                    )
 
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    ExternalSysResponse(
+                        transactionId.toString(),
+                        paymentId.toString(),
+                        false,
+                        e.message,
+                    )
                 }
             }
         } catch (e: Exception) {
-            when (e) {
-                is SocketTimeoutException -> {
-                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                    }
-                }
-
-                else -> {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
-                }
+            val reason = when (e) {
+                is SocketTimeoutException -> "Request timeout."
+                else -> e.message ?: "External payment request failed."
             }
+
+            logger.error(
+                "[$accountName] External payment failed: " +
+                        "txId=$transactionId, payment=$paymentId",
+                e,
+            )
+
+            ExternalSysResponse(
+                transactionId.toString(),
+                paymentId.toString(),
+                false,
+                reason,
+            )
         }
+
+        logger.info(
+            "[$accountName] Payment processed: " +
+                    "txId=$transactionId, " +
+                    "payment=$paymentId, " +
+                    "success=${result.result}, " +
+                    "message=${result.message}"
+        )
+
+        recordProcessingResult(
+            task = task,
+            success = result.result,
+            reason = result.message,
+        )
     }
 
-    override fun pendingRequests(): Int = requestQueue.pendingRequests()
+    override fun pendingRequests(): Int =
+        requestQueue.pendingRequests()
 
     override fun price() = properties.price
 
@@ -156,4 +227,4 @@ class PaymentExternalSystemAdapterImpl(
     override fun name() = properties.accountName
 }
 
-public fun now() = System.currentTimeMillis()
+public fun now(): Long = System.currentTimeMillis()
