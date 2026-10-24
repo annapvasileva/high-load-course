@@ -1,12 +1,18 @@
 package ru.quipy.payments.logic
 
+import io.micrometer.core.instrument.Clock
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.distribution.TimeWindowMax
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.SlidingQuantile
 import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.MAX_METRIC_BUFFER_LENGTH
+import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.MAX_METRIC_ROTATION_MILLIS
 import java.time.Duration
 import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.comparisons.maxOf
 import kotlin.math.max
 
 enum class PaymentRejectPhase {
@@ -21,12 +27,16 @@ class PaymentRequestQueue(
     queueCapacity: Int,
     private val meterRegistry: MeterRegistry,
     private val averageProcessingTime: Duration,
-    private val onExecute: (PaymentTask) -> Unit,
+    private val onExecute: (PaymentTask, () -> Unit) -> Unit,
     private val onReject: (PaymentTask, String, PaymentRejectPhase) -> Unit,
 ) {
     companion object {
         private val logger =
             LoggerFactory.getLogger(PaymentRequestQueue::class.java)
+
+        private const val DEADLINE_REJECT_QUANTILE = 0.90
+        private const val QUANTILE_COLD_START_SIZE = 100
+        private const val QUANTILE_COLD_START_AVERAGE_FACTOR = 1.2
     }
 
     init {
@@ -43,18 +53,23 @@ class PaymentRequestQueue(
 
     private val avgMillis = averageProcessingTime.toMillis()
 
-    private val workerLimit = minOf(parallelRequests, 256)
+    private val coldStartTimeMillis: Long = (avgMillis * QUANTILE_COLD_START_AVERAGE_FACTOR).toLong()
 
     private val throughputPerSec = minOf(
         rateLimitPerSec.toDouble(),
-        workerLimit * 1000.0 / avgMillis,
+        parallelRequests * 1000.0 / avgMillis,
     )
 
     private val queue = ArrayBlockingQueue<PaymentTask>(queueCapacity)
 
-    private val queueSizeMetric = Gauge.builder("payment_request_queue_size") { queue.size.toDouble() }
+    private val queueSizeMax = TimeWindowMax(
+        Clock.SYSTEM,
+        MAX_METRIC_ROTATION_MILLIS,
+        MAX_METRIC_BUFFER_LENGTH,
+    )
+    private val queueSizeMaxMetric = Gauge.builder("payment_request_queue_size_max",) { queueSizeMax.poll() }
         .tags("account", name)
-        .register(meterRegistry);
+        .register(meterRegistry)
 
     private val processingTimes = SlidingQuantile(
         windowSize = 1000,
@@ -63,11 +78,14 @@ class PaymentRequestQueue(
     )
 
     private fun reserveMillis(): Long {
-        if (processingTimes.count() < 30) {
-            return (avgMillis * 1.5).toLong()
+        // Prevent wrong quantile on small dataset
+        if (processingTimes.count() < QUANTILE_COLD_START_SIZE) {
+            return coldStartTimeMillis
         }
 
-        return processingTimes.quantile(0.97)
+        // Considering coldStartTimeMillis is basically less than quantile
+        // But to prevent quantile from degradation into a "deny all" scenario we use maxOf
+        return maxOf(processingTimes.quantile(DEADLINE_REJECT_QUANTILE), coldStartTimeMillis)
     }
 
     fun pendingRequests(): Int = queue.size
@@ -101,9 +119,11 @@ class PaymentRequestQueue(
             return
         }
 
-        val maxQueueAhead =
-            remaining / 1000.0 * throughputPerSec
-
+        // Submit reject if we suppose that queue size is large enough to block request for deadline time
+        // remaining is time that we can wait until it would be too late (after that there would be reject by deadline)
+        // maxQueueAhead is how many requests in average we can process with remaining time
+        // If we can process fewer requests than we actually have, we preventively deny submitting
+        val maxQueueAhead = remaining / 1000.0 * throughputPerSec
         if (queue.size >= maxQueueAhead) {
             reject(
                 task,
@@ -120,13 +140,12 @@ class PaymentRequestQueue(
                 "Payment queue overflow",
                 PaymentRejectPhase.ENQUEUE,
             )
+            return
         }
+        queueSizeMax.record(queue.size.toDouble())
     }
 
-    @Volatile
-    private var running = true
-
-    private val slots = Semaphore(workerLimit)
+    private val slots = Semaphore(parallelRequests)
 
     private val dispatcher = Thread(
         ::dispatcherLoop,
@@ -136,22 +155,8 @@ class PaymentRequestQueue(
         start()
     }
 
-    private val executor = ThreadPoolExecutor(
-        0,
-        workerLimit,
-        30L,
-        TimeUnit.SECONDS,
-        SynchronousQueue(),
-        { runnable ->
-            Thread(runnable, "payment-$name-worker").apply {
-                isDaemon = true
-            }
-        },
-        ThreadPoolExecutor.AbortPolicy(),
-    )
-
     private fun dispatcherLoop() {
-        while (running) {
+        while (true) {
             val task = try {
                 queue.take()
             } catch (e: InterruptedException) {
@@ -163,9 +168,10 @@ class PaymentRequestQueue(
     }
 
     private fun dispatch(task: PaymentTask) {
+        // Limit for parallel at time
         try {
             slots.acquire()
-        } catch (e: InterruptedException) {
+        } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
 
             reject(
@@ -176,7 +182,24 @@ class PaymentRequestQueue(
             return
         }
 
-        var transferredToWorker = false
+        val finished = AtomicBoolean(false)
+        var startedAtNanos: Long? = null
+        var handedOff = false
+
+        fun finish() {
+            if (!finished.compareAndSet(false, true)) {
+                return
+            }
+
+            startedAtNanos?.let { started ->
+                val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - started,
+                )
+                processingTimes.add(elapsedMillis)
+            }
+
+            slots.release()
+        }
 
         try {
             val maxWaitMillis = task.deadline - System.currentTimeMillis() - reserveMillis()
@@ -190,42 +213,25 @@ class PaymentRequestQueue(
                 return
             }
 
-            executor.execute {
-                try {
-                    val start = System.nanoTime()
+            startedAtNanos = System.nanoTime()
 
-                    try {
-                        onExecute(task)
-                    } catch (e: Exception) {
-                        logger.error(
-                            "Unexpected worker failure for payment " +
-                                    "${task.paymentId}",
-                            e,
-                        )
-                    } finally {
-                        val elapsedMillis =
-                            TimeUnit.NANOSECONDS.toMillis(
-                                System.nanoTime() - start
-                            )
+            onExecute(task, ::finish)
 
-                        processingTimes.add(elapsedMillis)
-                    }
-                } finally {
-                    slots.release()
-                }
-            }
+            handedOff = true
+        } catch (e: Exception) {
+            logger.error(
+                "Failed to start payment processing for ${task.paymentId}",
+                e,
+            )
 
-            transferredToWorker = true
-
-        } catch (e: RejectedExecutionException) {
             reject(
                 task,
-                "worker executor rejected task: ${e.message}",
+                "failed to start payment request: ${e.message}",
                 PaymentRejectPhase.DISPATCH,
             )
         } finally {
-            if (!transferredToWorker) {
-                slots.release()
+            if (!handedOff) {
+                finish()
             }
         }
     }

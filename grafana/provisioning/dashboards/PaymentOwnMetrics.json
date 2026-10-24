@@ -155,7 +155,7 @@
         "kind": "Panel",
         "spec": {
           "id": 2,
-          "title": "Request Queue Size",
+          "title": "Max queue size & Max in flight requests",
           "description": "",
           "links": [],
           "data": {
@@ -171,8 +171,8 @@
                       "version": "v0",
                       "spec": {
                         "editorMode": "builder",
-                        "expr": "payment_request_queue_size{account=\"$account\"}",
-                        "legendFormat": "__auto",
+                        "expr": "payment_request_queue_size_max{account=\"$account\"}",
+                        "legendFormat": "Queue Size",
                         "range": true
                       },
                       "labels": {
@@ -181,6 +181,28 @@
                       }
                     },
                     "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "spec": {
+                        "editorMode": "builder",
+                        "expr": "payment_sys_in_flight_max{account=\"$account\"}",
+                        "legendFormat": "In Flight",
+                        "range": true
+                      },
+                      "labels": {
+                        "grafana.app/export-label": "prometheus-1",
+                        "grafana.app/export-datasource-name": "Prometheus"
+                      }
+                    },
+                    "refId": "B",
                     "hidden": false
                   }
                 }

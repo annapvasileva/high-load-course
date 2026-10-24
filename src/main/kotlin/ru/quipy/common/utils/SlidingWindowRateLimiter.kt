@@ -54,16 +54,12 @@ class SlidingWindowRateLimiter(
             val remaining =
                 timeoutNanos - (System.nanoTime() - start)
 
-            if (remaining < 0L) {
+            if (remaining <= 0L) {
                 return false
             }
 
             if (tick()) {
                 return true
-            }
-
-            if (remaining == 0L) {
-                return false
             }
 
             val sleepNanos = minOf(

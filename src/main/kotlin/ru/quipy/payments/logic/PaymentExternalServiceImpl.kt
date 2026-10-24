@@ -3,15 +3,26 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.MeterRegistry
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
-import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.UUID
+import io.micrometer.core.instrument.Clock
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.distribution.TimeWindowMax
+import java.net.SocketTimeoutException
+import java.net.URI
+import java.net.URLEncoder
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.net.http.HttpTimeoutException
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
@@ -24,8 +35,23 @@ class PaymentExternalSystemAdapterImpl(
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
-        val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
+
+        // HTTP client is shared, because we are still limited by processors,
+        // but async operations allow enough parallel requests
+        private val httpExecutor: ExecutorService =
+            Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 2) { r ->
+                Thread(r, "payment-http").apply { isDaemon = true }
+            }
+        private val client = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .version(HttpClient.Version.HTTP_1_1)
+            .executor(httpExecutor)
+            .build()
+
+        public const val MAX_METRIC_ROTATION_MILLIS = 4_000L
+        public const val MAX_METRIC_BUFFER_LENGTH = 4
     }
 
     private val serviceName = properties.serviceName
@@ -34,8 +60,7 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
-
+    // TODO: Use dynamic queue size
     private val capacityMultiplier = 1000
     private val requestQueue = PaymentRequestQueue(
         name = accountName,
@@ -59,6 +84,21 @@ class PaymentExternalSystemAdapterImpl(
             "account", accountName,
             "type", type,
         )
+
+    private val inFlightRequests = AtomicInteger()
+
+    private val inFlightMax = TimeWindowMax(
+        Clock.SYSTEM,
+        MAX_METRIC_ROTATION_MILLIS,
+        MAX_METRIC_BUFFER_LENGTH,
+    )
+    private val inFlightMaxMetric = Gauge.builder(
+        "payment_sys_in_flight_max",
+    ) {
+        inFlightMax.poll()
+    }
+        .tags("account", accountName)
+        .register(meterRegistry)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -138,76 +178,157 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
-    private fun processPayment(task: PaymentTask) {
-        val paymentId = task.paymentId
-        val transactionId = task.transactionId
-        val amount = task.amount
+    private fun processPayment(
+        task: PaymentTask,
+        onTaskFinished: () -> Unit,
+    ) {
+        val request = try {
+            buildPaymentRequest(task)
+        } catch (e: Exception) {
+            try {
+                recordPaymentResult(task, failureResponse(task, e))
+            } finally {
+                onTaskFinished()
+            }
+            return
+        }
+
+        val future = try {
+            client.sendAsync(
+                request,
+                HttpResponse.BodyHandlers.ofString(),
+            )
+        } catch (e: Exception) {
+            try {
+                recordPaymentResult(task, failureResponse(task, e))
+            } finally {
+                onTaskFinished()
+            }
+            return
+        }
         outgoingCounter.increment()
 
-        val result: ExternalSysResponse = try {
-            val request = Request.Builder()
-                .url(
-                    "http://$paymentProviderHostPort/external/process" +
-                            "?serviceName=$serviceName" +
-                            "&token=$token" +
-                            "&accountName=$accountName" +
-                            "&transactionId=$transactionId" +
-                            "&paymentId=$paymentId" +
-                            "&amount=$amount"
-                )
-                .post(emptyBody)
-                .build()
+        val current = inFlightRequests.incrementAndGet()
+        inFlightMax.record(current.toDouble())
 
-            client.newCall(request).execute().use { response ->
-                val responseText = response.body?.string()
+        future.whenComplete { response, error ->
+            inFlightRequests.decrementAndGet()
 
-                try {
-                    mapper.readValue(
-                        responseText,
-                        ExternalSysResponse::class.java,
-                    )
-                } catch (e: Exception) {
-                    logger.error(
-                        "[$accountName] Invalid provider response: " +
-                                "txId=$transactionId, " +
-                                "HTTP ${response.code}, body=$responseText",
-                        e,
-                    )
-
-                    ExternalSysResponse(
-                        transactionId.toString(),
-                        paymentId.toString(),
-                        false,
-                        e.message,
-                    )
+            try {
+                val result = if (error != null) {
+                    failureResponse(task, error)
+                } else {
+                    parsePaymentResponse(task, response!!)
                 }
-            }
-        } catch (e: Exception) {
-            val reason = when (e) {
-                is SocketTimeoutException -> "Request timeout."
-                else -> e.message ?: "External payment request failed."
-            }
 
+                recordPaymentResult(task, result)
+            } catch (e: Exception) {
+                logger.error(
+                    "[$accountName] Unexpected response-processing failure: " +
+                            "txId=${task.transactionId}, payment=${task.paymentId}",
+                    e,
+                )
+
+                recordProcessingResult(
+                    task = task,
+                    success = false,
+                    reason = e.message ?: "Failed to process external response.",
+                )
+            } finally {
+                onTaskFinished()
+            }
+        }
+    }
+
+    private fun buildPaymentRequest(task: PaymentTask): HttpRequest {
+        val query = listOf(
+            "serviceName" to serviceName,
+            "token" to token,
+            "accountName" to accountName,
+            "transactionId" to task.transactionId.toString(),
+            "paymentId" to task.paymentId.toString(),
+            "amount" to task.amount.toString(),
+        ).joinToString("&") { (key, value) ->
+            "$key=${URLEncoder.encode(value, StandardCharsets.UTF_8)}"
+        }
+
+        val remaining = Duration.ofMillis(task.deadline - System.currentTimeMillis())
+
+        return HttpRequest.newBuilder()
+            .uri(
+                URI.create(
+                    "http://$paymentProviderHostPort/external/process?$query",
+                ),
+            )
+            .timeout(remaining)
+            .POST(HttpRequest.BodyPublishers.noBody())
+            .build()
+    }
+
+    private fun parsePaymentResponse(
+        task: PaymentTask,
+        response: HttpResponse<String>,
+    ): ExternalSysResponse {
+        val responseText = response.body()
+
+        return try {
+            mapper.readValue(
+                responseText,
+                ExternalSysResponse::class.java,
+            )
+        } catch (e: Exception) {
             logger.error(
-                "[$accountName] External payment failed: " +
-                        "txId=$transactionId, payment=$paymentId",
+                "[$accountName] Invalid provider response: " +
+                        "txId=${task.transactionId}, " +
+                        "HTTP ${response.statusCode()}, body=$responseText",
                 e,
             )
 
             ExternalSysResponse(
-                transactionId.toString(),
-                paymentId.toString(),
+                task.transactionId.toString(),
+                task.paymentId.toString(),
                 false,
-                reason,
+                e.message,
             )
+        }
+    }
+
+    private fun failureResponse(
+        task: PaymentTask,
+        error: Throwable,
+    ): ExternalSysResponse {
+        val cause = (error as? CompletionException)?.cause ?: error
+
+        val reason = when (cause) {
+            is HttpTimeoutException -> "Request timeout."
+            is SocketTimeoutException -> "Request socket timeout."
+            else -> cause.message ?: "External payment request failed."
         }
 
         logger.info(
+            "[$accountName] External payment failed: " +
+                    "txId=${task.transactionId}, payment=${task.paymentId}",
+            cause,
+        )
+
+        return ExternalSysResponse(
+            task.transactionId.toString(),
+            task.paymentId.toString(),
+            false,
+            reason,
+        )
+    }
+
+    private fun recordPaymentResult(
+        task: PaymentTask,
+        result: ExternalSysResponse,
+    ) {
+        logger.info(
             "[$accountName] Payment processed: " +
-                    "txId=$transactionId, " +
-                    "payment=$paymentId, " +
+                    "txId=${task.transactionId}, " +
+                    "payment=${task.paymentId}, " +
                     "success=${result.result}, " +
-                    "message=${result.message}"
+                    "message=${result.message}",
         )
 
         recordProcessingResult(
