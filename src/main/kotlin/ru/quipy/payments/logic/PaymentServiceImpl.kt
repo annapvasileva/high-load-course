@@ -13,17 +13,18 @@ class PaymentSystemImpl(
         val logger = LoggerFactory.getLogger(PaymentSystemImpl::class.java)
     }
 
-    override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun submitPaymentRequest(
+        paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long,
+    ): SubmitResult {
         val account = paymentAccounts
             .asSequence()
             .filter { it.isEnabled() }
             .minByOrNull { it.pendingRequests() }
+            ?: return SubmitResult.Retryable(
+                reason = "No enabled payment accounts for payment $paymentId",
+                retryAfterSeconds = 5L,
+            )
 
-        if (account == null) {
-            logger.error("No enabled accounts for payment $paymentId")
-            return
-        }
-
-        account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
+        return account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
     }
 }

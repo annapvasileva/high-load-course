@@ -5,6 +5,7 @@ import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.distribution.TimeWindowMax
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.SlidingAverage
 import ru.quipy.common.utils.SlidingQuantile
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.MAX_METRIC_BUFFER_LENGTH
@@ -20,6 +21,20 @@ enum class PaymentRejectPhase {
     DISPATCH,
 }
 
+sealed interface SubmitResult {
+    data object Accepted : SubmitResult
+
+    data class Retryable(
+        val reason: String,
+        val retryAfterSeconds: Long,
+    ) : SubmitResult
+
+    data class BadRequest(
+        val reason: String,
+        val minRequiredDeadlineMs: Long,
+    ) : SubmitResult
+}
+
 class PaymentRequestQueue(
     name: String,
     rateLimitPerSec: Int,
@@ -33,6 +48,11 @@ class PaymentRequestQueue(
     companion object {
         private val logger =
             LoggerFactory.getLogger(PaymentRequestQueue::class.java)
+
+        private const val OVERLOAD_THRESHOLD = 0.95
+        private const val MAX_RETRY_AFTER_SEC = 30L
+        private const val MIN_DRAIN_FRACTION = 0.1
+        private const val RETRY_JITTER_FRACTION = 0.3
 
         private const val DEADLINE_REJECT_QUANTILE = 0.90
         private const val QUANTILE_COLD_START_SIZE = 100
@@ -59,6 +79,8 @@ class PaymentRequestQueue(
         rateLimitPerSec.toDouble(),
         parallelRequests * 1000.0 / avgMillis,
     )
+
+    private val arrivalTracker = SlidingAverage(bucketCount = 10, bucketNanos = 100_000_000L)
 
     private val queue = ArrayBlockingQueue<PaymentTask>(queueCapacity)
 
@@ -90,6 +112,21 @@ class PaymentRequestQueue(
 
     fun pendingRequests(): Int = queue.size
 
+    private fun retryAfterSeconds(excess: Double): Long {
+        if (excess <= 0.0) return 1L
+        val lambda = arrivalTracker.ratePerSec()
+        val loadFactor = lambda / throughputPerSec
+
+        if (loadFactor >= OVERLOAD_THRESHOLD) return MAX_RETRY_AFTER_SEC
+
+        val drain = (throughputPerSec - lambda)
+            .coerceAtLeast(throughputPerSec * MIN_DRAIN_FRACTION)
+
+        val baseSec = excess / drain
+        val jittered = baseSec * (1.0 + ThreadLocalRandom.current().nextDouble(0.0, RETRY_JITTER_FRACTION))
+        return kotlin.math.ceil(jittered).toLong().coerceIn(1L, MAX_RETRY_AFTER_SEC)
+    }
+
     private fun reject(
         task: PaymentTask,
         reason: String,
@@ -106,17 +143,18 @@ class PaymentRequestQueue(
         }
     }
 
-    fun submit(task: PaymentTask) {
+    fun submit(task: PaymentTask): SubmitResult {
+        arrivalTracker.record()
+
         val now = System.currentTimeMillis()
-        val remaining = task.deadline - now - reserveMillis()
+        val reserve = reserveMillis()
+        val remaining = task.deadline - now - reserve
 
         if (remaining <= 0) {
-            reject(
-                task,
-                "not enough time left at enqueue (now: $now)",
-                PaymentRejectPhase.ENQUEUE,
-            )
-            return
+            val reason = "not enough time left at enqueue (now: $now, reserve: $reserve)"
+            reject(task, reason, PaymentRejectPhase.ENQUEUE)
+            logger.error(reason)
+            return SubmitResult.BadRequest(reason, minRequiredDeadlineMs = reserve)
         }
 
         // Submit reject if we suppose that queue size is large enough to block request for deadline time
@@ -125,24 +163,20 @@ class PaymentRequestQueue(
         // If we can process fewer requests than we actually have, we preventively deny submitting
         val maxQueueAhead = remaining / 1000.0 * throughputPerSec
         if (queue.size >= maxQueueAhead) {
-            reject(
-                task,
-                "queue ahead ${queue.size} >= N=$maxQueueAhead " +
-                        "(v=$throughputPerSec)",
-                PaymentRejectPhase.ENQUEUE,
-            )
-            return
+            val excess = queue.size - maxQueueAhead
+            val reason = "queue ahead ${queue.size} >= N=$maxQueueAhead (v=$throughputPerSec)"
+            reject(task, reason, PaymentRejectPhase.ENQUEUE)
+            return SubmitResult.Retryable(reason, retryAfterSeconds(excess))
         }
 
         if (!queue.offer(task)) {
-            reject(
-                task,
-                "Payment queue overflow",
-                PaymentRejectPhase.ENQUEUE,
-            )
-            return
+            val reason = "Payment queue overflow"
+            reject(task, reason, PaymentRejectPhase.ENQUEUE)
+            return SubmitResult.Retryable(reason, retryAfterSeconds(queue.size.toDouble()))
         }
         queueSizeMax.record(queue.size.toDouble())
+
+        return SubmitResult.Accepted
     }
 
     private val slots = Semaphore(parallelRequests)

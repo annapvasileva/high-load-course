@@ -8,6 +8,11 @@ import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
 
+data class OrderPaymentOutcome(
+    val createdAt: Long,
+    val submitResult: SubmitResult,
+)
+
 @Service
 class OrderPayer {
 
@@ -21,19 +26,14 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): OrderPaymentOutcome {
         val createdAt = System.currentTimeMillis()
         val createdEvent = paymentESService.create {
-            it.create(
-                paymentId,
-                orderId,
-                amount
-            )
+            it.create(paymentId, orderId, amount)
         }
         logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
-        paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
-
-        return createdAt
+        val result = paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+        return OrderPaymentOutcome(createdAt, result)
     }
 }

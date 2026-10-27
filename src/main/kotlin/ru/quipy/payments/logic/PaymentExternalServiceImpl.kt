@@ -100,7 +100,9 @@ class PaymentExternalSystemAdapterImpl(
         .tags("account", accountName)
         .register(meterRegistry)
 
-    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override fun performPaymentAsync(
+        paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long,
+    ): SubmitResult {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
         incomingCounter.increment()
 
@@ -114,7 +116,7 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
-        requestQueue.submit(
+        return requestQueue.submit(
             PaymentTask(
                 paymentId = paymentId,
                 amount = amount,
