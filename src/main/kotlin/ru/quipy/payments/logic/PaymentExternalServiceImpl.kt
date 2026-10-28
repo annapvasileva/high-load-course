@@ -46,7 +46,7 @@ class PaymentExternalSystemAdapterImpl(
         private val client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .followRedirects(HttpClient.Redirect.NORMAL)
-            .version(HttpClient.Version.HTTP_1_1)
+            .version(HttpClient.Version.HTTP_2)
             .executor(httpExecutor)
             .build()
 
@@ -307,7 +307,7 @@ class PaymentExternalSystemAdapterImpl(
             else -> cause.message ?: "External payment request failed."
         }
 
-        logger.info(
+        logger.error(
             "[$accountName] External payment failed: " +
                     "txId=${task.transactionId}, payment=${task.paymentId}",
             cause,
