@@ -1,14 +1,93 @@
-### Run test locally
+### Case 1 - account: "acc-3"
 POST http://localhost:1234/test/run
 Content-Type: application/json
 
 {
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
-  "ratePerSecond": 1,
-  "testCount": 100,
-  "processingTimeMillis": 80000
+  "ratePerSecond": 11,
+  "testCount": 1200
 }
+
+
+### Case 2 - account: "acc-5"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 2,
+  "testCount": 100,
+  "processingTimeMillis": 60000
+}
+
+
+### Case 3 - account: "acc-5"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 2,
+  "testCount": 500,
+  "processingTimeMillis": 60000
+}
+
+
+### Case 4 - account: "acc-18"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 200,
+  "testCount": 6000,
+  "processingTimeMillis": 3000
+}
+
+
+### Case 5.1 - account: "acc-23"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 15,
+  "testCount": 3000,
+  "processingTimeMillis": 2500
+}
+
+### Case 5.2 - account: "acc-23"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 11,
+  "testCount": 2200,
+  "processingTimeMillis": 13000,
+  "profile": "s_0.7_60"
+}
+
+
+### Case 5.3 - account: "acc-23"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 3,
+  "testCount": 1050,
+  "processingTimeMillis": 26000,
+  "runits": 90
+}
+
 
 ### Stop running test to save time and resources
 # @timeout 120

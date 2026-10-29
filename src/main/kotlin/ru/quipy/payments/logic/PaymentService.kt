@@ -7,7 +7,7 @@ interface PaymentService {
     /**
      * Submit payment request to some external service.
      */
-    fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long)
+    fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long): SubmitResult
 }
 
 /**
@@ -17,13 +17,15 @@ interface PaymentService {
 
  */
 interface PaymentExternalSystemAdapter {
-    fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long)
+    fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long): SubmitResult
 
     fun name(): String
 
     fun price(): Int
 
     fun isEnabled(): Boolean
+
+    fun pendingRequests(): Int
 }
 
 /**
@@ -47,4 +49,15 @@ class ExternalSysResponse(
     val paymentId: String,
     val result: Boolean,
     val message: String? = null,
+)
+
+/**
+ * Describes request for payment to queue it.
+ */
+data class PaymentTask(
+    val paymentId: UUID,
+    val transactionId: UUID,
+    val amount: Int,
+    val paymentStartedAt: Long,
+    val deadline: Long,
 )
