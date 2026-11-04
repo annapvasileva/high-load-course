@@ -333,11 +333,45 @@ class PaymentExternalSystemAdapterImpl(
                     "message=${result.message}",
         )
 
+        if (!result.result &&
+            result.message == "Temporary error" &&
+            retryPayment(task)
+        ) {
+            return
+        }
+
         recordProcessingResult(
             task = task,
             success = result.result,
             reason = result.message,
         )
+    }
+
+    private fun retryPayment(task: PaymentTask): Boolean {
+        if (task.attempt >= 1 || now() >= task.deadline) {
+            return false
+        }
+
+        val retryTask = task.copy(
+            transactionId = UUID.randomUUID(),
+            attempt = task.attempt + 1,
+        )
+
+        logger.info(
+            "[$accountName] Retrying payment ${task.paymentId}, attempt=${retryTask.attempt}"
+        )
+
+        paymentESService.update(task.paymentId) {
+            it.logSubmission(
+                success = true,
+                transactionId = retryTask.transactionId,
+                startedAt = now(),
+                spentInQueueDuration = Duration.ofMillis(now() - task.paymentStartedAt),
+            )
+        }
+
+        requestQueue.submit(retryTask)
+        return true
     }
 
     override fun pendingRequests(): Int =

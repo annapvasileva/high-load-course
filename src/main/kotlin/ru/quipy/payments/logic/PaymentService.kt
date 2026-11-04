@@ -60,4 +60,5 @@ data class PaymentTask(
     val amount: Int,
     val paymentStartedAt: Long,
     val deadline: Long,
+    val attempt: Int = 0,
 )
