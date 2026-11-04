@@ -89,6 +89,18 @@ Content-Type: application/json
 }
 
 
+### Case 6 - account: "acc-8"
+POST http://localhost:1234/test/run
+Content-Type: application/json
+
+{
+  "serviceName": "{{serviceName}}",
+  "token": "{{token}}",
+  "ratePerSecond": 7,
+  "testCount": 800,
+  "processingTimeMillis": 3500
+}
+
 ### Stop running test to save time and resources
 # @timeout 120
 POST http://localhost:1234/test/stop/{{serviceName}}
