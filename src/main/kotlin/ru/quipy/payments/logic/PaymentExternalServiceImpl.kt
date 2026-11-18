@@ -77,6 +77,7 @@ class PaymentExternalSystemAdapterImpl(
     private val outgoingCounter = counter("outgoing")
     private val rejectedEnqueueCounter = counter("rejected_enqueue")
     private val rejectedDispatchCounter = counter("rejected_dispatch")
+    private val retryCounter = counter("retry")
 
     private fun counter(type: String) =
         meterRegistry.counter(
@@ -370,6 +371,7 @@ class PaymentExternalSystemAdapterImpl(
             )
         }
 
+        retryCounter.increment()
         requestQueue.submit(retryTask)
         return true
     }
