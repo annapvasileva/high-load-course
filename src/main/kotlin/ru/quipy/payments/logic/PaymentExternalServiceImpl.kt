@@ -183,10 +183,11 @@ class PaymentExternalSystemAdapterImpl(
 
     private fun processPayment(
         task: PaymentTask,
+        requestTimeout: Duration,
         onTaskFinished: () -> Unit,
     ) {
         val request = try {
-            buildPaymentRequest(task)
+            buildPaymentRequest(task, requestTimeout)
         } catch (e: Exception) {
             try {
                 recordPaymentResult(task, failureResponse(task, e))
@@ -243,7 +244,7 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
-    private fun buildPaymentRequest(task: PaymentTask): HttpRequest {
+    private fun buildPaymentRequest(task: PaymentTask, requestTimeout: Duration): HttpRequest {
         val query = listOf(
             "serviceName" to serviceName,
             "token" to token,
@@ -263,7 +264,7 @@ class PaymentExternalSystemAdapterImpl(
                     "http://$paymentProviderHostPort/external/process?$query",
                 ),
             )
-            .timeout(remaining)
+            .timeout(minOf(remaining, requestTimeout))
             .POST(HttpRequest.BodyPublishers.noBody())
             .build()
     }

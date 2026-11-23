@@ -42,7 +42,7 @@ class PaymentRequestQueue(
     queueCapacity: Int,
     private val meterRegistry: MeterRegistry,
     private val averageProcessingTime: Duration,
-    private val onExecute: (PaymentTask, () -> Unit) -> Unit,
+    private val onExecute: (PaymentTask, Duration, () -> Unit) -> Unit,
     private val onReject: (PaymentTask, String, PaymentRejectPhase) -> Unit,
 ) {
     companion object {
@@ -57,6 +57,9 @@ class PaymentRequestQueue(
         private const val DEADLINE_REJECT_QUANTILE = 0.90
         private const val QUANTILE_COLD_START_SIZE = 100
         private const val QUANTILE_COLD_START_AVERAGE_FACTOR = 1.2
+
+        private const val REQUEST_TIMEOUT_QUANTILE = 0.90
+        private const val REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR = 1.5
     }
 
     init {
@@ -108,6 +111,16 @@ class PaymentRequestQueue(
         // Considering coldStartTimeMillis is basically less than quantile
         // But to prevent quantile from degradation into a "deny all" scenario we use maxOf
         return maxOf(processingTimes.quantile(DEADLINE_REJECT_QUANTILE), coldStartTimeMillis)
+    }
+
+    private val minRequestTimeoutMillis: Long = (avgMillis * REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR).toLong()
+
+    private fun requestTimeoutMillis(): Long {
+        if (processingTimes.count() < QUANTILE_COLD_START_SIZE) {
+            return minRequestTimeoutMillis
+        }
+
+        return maxOf(processingTimes.quantile(REQUEST_TIMEOUT_QUANTILE), minRequestTimeoutMillis)
     }
 
     fun pendingRequests(): Int = queue.size
@@ -249,7 +262,7 @@ class PaymentRequestQueue(
 
             startedAtNanos = System.nanoTime()
 
-            onExecute(task, ::finish)
+            onExecute(task, Duration.ofMillis(requestTimeoutMillis()), ::finish)
 
             handedOff = true
         } catch (e: Exception) {
