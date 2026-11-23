@@ -22,6 +22,8 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 
 class PaymentExternalSystemAdapterImpl(
@@ -44,7 +46,7 @@ class PaymentExternalSystemAdapterImpl(
                 Thread(r, "payment-http").apply { isDaemon = true }
             }
         private val client = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
+            .connectTimeout(Duration.ofSeconds(1))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .version(HttpClient.Version.HTTP_2)
             .executor(httpExecutor)
@@ -186,8 +188,10 @@ class PaymentExternalSystemAdapterImpl(
         requestTimeout: Duration,
         onTaskFinished: () -> Unit,
     ) {
+        val callTimeout = minOf(Duration.ofMillis(task.deadline - now()), requestTimeout)
+
         val request = try {
-            buildPaymentRequest(task, requestTimeout)
+            buildPaymentRequest(task, callTimeout)
         } catch (e: Exception) {
             try {
                 recordPaymentResult(task, failureResponse(task, e))
@@ -215,7 +219,10 @@ class PaymentExternalSystemAdapterImpl(
         val current = inFlightRequests.incrementAndGet()
         inFlightMax.record(current.toDouble())
 
-        future.whenComplete { response, error ->
+        future.copy().orTimeout(callTimeout.toMillis(), TimeUnit.MILLISECONDS).whenComplete { response, error ->
+            if (error is TimeoutException) {
+                future.cancel(true)
+            }
             inFlightRequests.decrementAndGet()
 
             try {
@@ -244,7 +251,7 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
-    private fun buildPaymentRequest(task: PaymentTask, requestTimeout: Duration): HttpRequest {
+    private fun buildPaymentRequest(task: PaymentTask, callTimeout: Duration): HttpRequest {
         val query = listOf(
             "serviceName" to serviceName,
             "token" to token,
@@ -256,15 +263,13 @@ class PaymentExternalSystemAdapterImpl(
             "$key=${URLEncoder.encode(value, StandardCharsets.UTF_8)}"
         }
 
-        val remaining = Duration.ofMillis(task.deadline - System.currentTimeMillis())
-
         return HttpRequest.newBuilder()
             .uri(
                 URI.create(
                     "http://$paymentProviderHostPort/external/process?$query",
                 ),
             )
-            .timeout(minOf(remaining, requestTimeout))
+            .timeout(callTimeout)
             .POST(HttpRequest.BodyPublishers.noBody())
             .build()
     }
@@ -304,7 +309,7 @@ class PaymentExternalSystemAdapterImpl(
         val cause = (error as? CompletionException)?.cause ?: error
 
         val reason = when (cause) {
-            is HttpTimeoutException -> "Request timeout."
+            is HttpTimeoutException, is TimeoutException -> "Request timeout."
             is SocketTimeoutException -> "Request socket timeout."
             else -> cause.message ?: "External payment request failed."
         }
