@@ -14,13 +14,16 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.time.Duration
 import java.util.*
 
 
 @Configuration
 class PaymentAccountsConfig {
     companion object {
-        private val javaClient = HttpClient.newBuilder().build()
+        private val javaClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build()
         private val mapper = ObjectMapper().registerKotlinModule().registerModules(JavaTimeModule())
     }
 
@@ -43,6 +46,7 @@ class PaymentAccountsConfig {
     ): List<PaymentExternalSystemAdapter> {
         val request = HttpRequest.newBuilder()
             .uri(URI("http://${paymentProviderHostPort}/external/accounts?serviceName=$serviceName&token=$token"))
+            .timeout(Duration.ofSeconds(10))
             .GET()
             .build()
 

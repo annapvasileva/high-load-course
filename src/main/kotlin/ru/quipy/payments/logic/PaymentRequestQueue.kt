@@ -220,14 +220,26 @@ class PaymentRequestQueue(
 
     private fun dispatch(task: PaymentTask) {
         // Limit for parallel at time
-        try {
-            slots.acquire()
+        val acquired = try {
+            slots.tryAcquire(
+                task.deadline - System.currentTimeMillis() - reserveMillis(),
+                TimeUnit.MILLISECONDS,
+            )
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
 
             reject(
                 task,
                 "dispatcher interrupted while acquiring worker slot",
+                PaymentRejectPhase.DISPATCH,
+            )
+            return
+        }
+
+        if (!acquired) {
+            reject(
+                task,
+                "no worker slot before deadline",
                 PaymentRejectPhase.DISPATCH,
             )
             return

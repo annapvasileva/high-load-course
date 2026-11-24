@@ -1,9 +1,12 @@
 package ru.quipy.config
 
+import com.zaxxer.hikari.HikariDataSource
 import jakarta.annotation.PostConstruct
 import org.eclipse.jetty.http2.server.HTTP2CServerConnectionFactory
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.beans.factory.config.BeanPostProcessor
 import org.springframework.boot.web.embedded.jetty.JettyServerCustomizer
 import org.springframework.boot.web.embedded.jetty.JettyServletWebServerFactory
 import org.springframework.context.annotation.Bean
@@ -37,6 +40,23 @@ import java.util.*
  */
 @Configuration
 class EventSourcingLibConfiguration {
+
+    companion object {
+        @Bean
+        @JvmStatic
+        fun hikariTimeoutsPostProcessor(
+            @Value("\${spring.datasource.hikari.connection-timeout:2000}") connectionTimeout: Long,
+            @Value("\${spring.datasource.hikari.validation-timeout:1000}") validationTimeout: Long,
+        ) = object : BeanPostProcessor {
+            override fun postProcessAfterInitialization(bean: Any, beanName: String): Any {
+                if (bean is HikariDataSource) {
+                    bean.connectionTimeout = connectionTimeout
+                    bean.validationTimeout = validationTimeout
+                }
+                return bean
+            }
+        }
+    }
 
     private val logger = LoggerFactory.getLogger(EventSourcingLibConfiguration::class.java)
 
