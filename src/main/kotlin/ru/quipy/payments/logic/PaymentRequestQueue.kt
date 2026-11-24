@@ -127,6 +127,8 @@ class PaymentRequestQueue(
         .tags("account", name)
         .register(meterRegistry)
 
+    fun hasTimeFor(deadline: Long): Boolean = deadline - System.currentTimeMillis() > reserveMillis()
+
     fun pendingRequests(): Int = queue.size
 
     private fun retryAfterSeconds(excess: Double): Long {

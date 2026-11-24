@@ -55,6 +55,9 @@ class PaymentExternalSystemAdapterImpl(
 
         public const val MAX_METRIC_ROTATION_MILLIS = 4_000L
         public const val MAX_METRIC_BUFFER_LENGTH = 4
+
+        private const val MAX_RETRY_ATTEMPTS = 2
+        private val RETRYABLE_MESSAGES = setOf("Temporary error", "Request timeout.")
     }
 
     private val serviceName = properties.serviceName
@@ -371,7 +374,7 @@ class PaymentExternalSystemAdapterImpl(
         )
 
         if (!result.result &&
-            result.message == "Temporary error" &&
+            result.message in RETRYABLE_MESSAGES &&
             retryPayment(task)
         ) {
             return
@@ -385,7 +388,7 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private fun retryPayment(task: PaymentTask): Boolean {
-        if (task.attempt >= 1 || now() >= task.deadline) {
+        if (task.attempt >= MAX_RETRY_ATTEMPTS || !requestQueue.hasTimeFor(task.deadline)) {
             return false
         }
 
