@@ -123,6 +123,10 @@ class PaymentRequestQueue(
         return maxOf(processingTimes.quantile(REQUEST_TIMEOUT_QUANTILE), minRequestTimeoutMillis)
     }
 
+    private val requestTimeoutMetric = Gauge.builder("payment_request_timeout_seconds") { requestTimeoutMillis() / 1000.0 }
+        .tags("account", name)
+        .register(meterRegistry)
+
     fun pendingRequests(): Int = queue.size
 
     private fun retryAfterSeconds(excess: Double): Long {

@@ -10,6 +10,7 @@ import java.time.Duration
 import java.util.UUID
 import io.micrometer.core.instrument.Clock
 import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.Timer
 import io.micrometer.core.instrument.distribution.TimeWindowMax
 import java.net.SocketTimeoutException
 import java.net.URI
@@ -80,6 +81,7 @@ class PaymentExternalSystemAdapterImpl(
     private val rejectedEnqueueCounter = counter("rejected_enqueue")
     private val rejectedDispatchCounter = counter("rejected_dispatch")
     private val retryCounter = counter("retry")
+    private val timeoutCounter = counter("timeout")
 
     private fun counter(type: String) =
         meterRegistry.counter(
@@ -87,6 +89,14 @@ class PaymentExternalSystemAdapterImpl(
             "account", accountName,
             "type", type,
         )
+
+    private val latencyTimers = listOf("success", "fail", "timeout").associateWith(::latencyTimer)
+
+    private fun latencyTimer(outcome: String) =
+        Timer.builder("payment_sys_request_latency")
+            .tags("account", accountName, "outcome", outcome)
+            .publishPercentiles(0.5, 0.9, 0.99)
+            .register(meterRegistry)
 
     private val inFlightRequests = AtomicInteger()
 
@@ -201,6 +211,8 @@ class PaymentExternalSystemAdapterImpl(
             return
         }
 
+        val startedAtNanos = System.nanoTime()
+
         val future = try {
             client.sendAsync(
                 request,
@@ -220,6 +232,7 @@ class PaymentExternalSystemAdapterImpl(
         inFlightMax.record(current.toDouble())
 
         future.copy().orTimeout(callTimeout.toMillis(), TimeUnit.MILLISECONDS).whenComplete { response, error ->
+            val elapsedNanos = System.nanoTime() - startedAtNanos
             if (error is TimeoutException) {
                 future.cancel(true)
             }
@@ -232,6 +245,7 @@ class PaymentExternalSystemAdapterImpl(
                     parsePaymentResponse(task, response!!)
                 }
 
+                recordLatency(elapsedNanos, error, result.result)
                 recordPaymentResult(task, result)
             } catch (e: Exception) {
                 logger.error(
@@ -249,6 +263,22 @@ class PaymentExternalSystemAdapterImpl(
                 onTaskFinished()
             }
         }
+    }
+
+    private fun recordLatency(elapsedNanos: Long, error: Throwable?, success: Boolean) {
+        val cause = (error as? CompletionException)?.cause ?: error
+
+        val outcome = when {
+            cause is TimeoutException || cause is HttpTimeoutException -> "timeout"
+            success -> "success"
+            else -> "fail"
+        }
+
+        if (outcome == "timeout") {
+            timeoutCounter.increment()
+        }
+
+        latencyTimers.getValue(outcome).record(elapsedNanos, TimeUnit.NANOSECONDS)
     }
 
     private fun buildPaymentRequest(task: PaymentTask, callTimeout: Duration): HttpRequest {
