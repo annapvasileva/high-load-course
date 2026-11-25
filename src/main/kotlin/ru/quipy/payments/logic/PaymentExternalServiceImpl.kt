@@ -58,6 +58,8 @@ class PaymentExternalSystemAdapterImpl(
 
         private const val MAX_RETRY_ATTEMPTS = 2
         private val RETRYABLE_MESSAGES = setOf("Temporary error", "Request timeout.")
+
+        private const val PROVIDER_TIMEOUT_FRACTION = 0.9
     }
 
     private val serviceName = properties.serviceName
@@ -292,6 +294,7 @@ class PaymentExternalSystemAdapterImpl(
             "transactionId" to task.transactionId.toString(),
             "paymentId" to task.paymentId.toString(),
             "amount" to task.amount.toString(),
+            "timeout" to providerTimeout(callTimeout).toString(),
         ).joinToString("&") { (key, value) ->
             "$key=${URLEncoder.encode(value, StandardCharsets.UTF_8)}"
         }
@@ -306,6 +309,9 @@ class PaymentExternalSystemAdapterImpl(
             .POST(HttpRequest.BodyPublishers.noBody())
             .build()
     }
+
+    private fun providerTimeout(callTimeout: Duration): Duration =
+        Duration.ofMillis((callTimeout.toMillis() * PROVIDER_TIMEOUT_FRACTION).toLong().coerceAtLeast(1L))
 
     private fun parsePaymentResponse(
         task: PaymentTask,
@@ -374,7 +380,7 @@ class PaymentExternalSystemAdapterImpl(
         )
 
         if (!result.result &&
-            result.message in RETRYABLE_MESSAGES &&
+            isRetryable(result.message) &&
             retryPayment(task)
         ) {
             return
@@ -386,6 +392,9 @@ class PaymentExternalSystemAdapterImpl(
             reason = result.message,
         )
     }
+
+    private fun isRetryable(message: String?): Boolean =
+        message in RETRYABLE_MESSAGES || message?.contains("timeout", ignoreCase = true) == true
 
     private fun retryPayment(task: PaymentTask): Boolean {
         if (task.attempt >= MAX_RETRY_ATTEMPTS || !requestQueue.hasTimeFor(task.deadline)) {
