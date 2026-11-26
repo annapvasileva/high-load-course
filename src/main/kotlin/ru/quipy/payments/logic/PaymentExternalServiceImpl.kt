@@ -59,7 +59,7 @@ class PaymentExternalSystemAdapterImpl(
         private const val MAX_RETRY_ATTEMPTS = 2
         private val RETRYABLE_MESSAGES = setOf("Temporary error", "Request timeout.")
 
-        private const val PROVIDER_TIMEOUT_FRACTION = 0.9
+        internal const val PROVIDER_TIMEOUT_FRACTION = 0.9
     }
 
     private val serviceName = properties.serviceName
@@ -251,6 +251,9 @@ class PaymentExternalSystemAdapterImpl(
                 }
 
                 recordLatency(elapsedNanos, error, result.result)
+                if (result.result) {
+                    requestQueue.recordSuccessfulCall(TimeUnit.NANOSECONDS.toMillis(elapsedNanos))
+                }
                 recordPaymentResult(task, result)
             } catch (e: Exception) {
                 logger.error(

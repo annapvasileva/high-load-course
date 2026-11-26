@@ -10,10 +10,12 @@ import ru.quipy.common.utils.SlidingQuantile
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.MAX_METRIC_BUFFER_LENGTH
 import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.MAX_METRIC_ROTATION_MILLIS
+import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.PROVIDER_TIMEOUT_FRACTION
 import java.time.Duration
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.comparisons.maxOf
+import kotlin.math.ceil
 import kotlin.math.max
 
 enum class PaymentRejectPhase {
@@ -58,8 +60,10 @@ class PaymentRequestQueue(
         private const val QUANTILE_COLD_START_SIZE = 100
         private const val QUANTILE_COLD_START_AVERAGE_FACTOR = 1.2
 
-        private const val REQUEST_TIMEOUT_QUANTILE = 0.90
-        private const val REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR = 1.5
+        private const val REQUEST_TIMEOUT_QUANTILE = 0.97
+        private const val REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR = 1.2
+        private const val PROBE_EVERY_N_REQUESTS = 10
+        private const val PROBE_TIMEOUT_FACTOR = 2.0
     }
 
     init {
@@ -67,6 +71,9 @@ class PaymentRequestQueue(
         require(parallelRequests > 0)
         require(queueCapacity > 0)
         require(averageProcessingTime.toMillis() > 0)
+        require(PROBE_EVERY_N_REQUESTS > 1 && REQUEST_TIMEOUT_QUANTILE > 1.0 - 1.0 / PROBE_EVERY_N_REQUESTS) {
+            "The fraction of probe requests must exceed the tail above the timeout quantile"
+        }
     }
 
     private val limiter = SlidingWindowRateLimiter(
@@ -113,15 +120,21 @@ class PaymentRequestQueue(
         return maxOf(processingTimes.quantile(DEADLINE_REJECT_QUANTILE), coldStartTimeMillis)
     }
 
-    private val minRequestTimeoutMillis: Long = (avgMillis * REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR).toLong()
+    private val successfulCallTimes = SlidingQuantile(
+        windowSize = 1000,
+        bucketWidth = max(1L, avgMillis / 10),
+        numBuckets = 100,
+    )
+    private val minRequestTimeoutMillis = (avgMillis * REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR).toLong()
 
     private fun requestTimeoutMillis(): Long {
-        if (processingTimes.count() < QUANTILE_COLD_START_SIZE) {
-            return minRequestTimeoutMillis
-        }
+        if (successfulCallTimes.count() < QUANTILE_COLD_START_SIZE) return minRequestTimeoutMillis
 
-        return maxOf(processingTimes.quantile(REQUEST_TIMEOUT_QUANTILE), minRequestTimeoutMillis)
+        val latency = successfulCallTimes.quantile(REQUEST_TIMEOUT_QUANTILE)
+        return maxOf(minRequestTimeoutMillis, ceil(latency / PROVIDER_TIMEOUT_FRACTION).toLong())
     }
+
+    internal fun recordSuccessfulCall(elapsedMillis: Long) = successfulCallTimes.add(elapsedMillis)
 
     private val requestTimeoutMetric = Gauge.builder("payment_request_timeout_seconds") { requestTimeoutMillis() / 1000.0 }
         .tags("account", name)
@@ -199,6 +212,7 @@ class PaymentRequestQueue(
     }
 
     private val slots = Semaphore(parallelRequests)
+    private var requestsSinceProbe = 0
 
     private val dispatcher = Thread(
         ::dispatcherLoop,
@@ -278,9 +292,13 @@ class PaymentRequestQueue(
                 return
             }
 
+            var timeoutMillis = requestTimeoutMillis()
+            if (++requestsSinceProbe == PROBE_EVERY_N_REQUESTS) {
+                requestsSinceProbe = 0
+                timeoutMillis = (timeoutMillis * PROBE_TIMEOUT_FACTOR).toLong()
+            }
             startedAtNanos = System.nanoTime()
-
-            onExecute(task, Duration.ofMillis(requestTimeoutMillis()), ::finish)
+            onExecute(task, Duration.ofMillis(timeoutMillis), ::finish)
 
             handedOff = true
         } catch (e: Exception) {
