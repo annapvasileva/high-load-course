@@ -1,4 +1,4 @@
-### Run test remotely
+### Case 8 - remote - acc-9
 # @timeout 120
 POST http://77.234.215.138:34321/run
 Content-Type: application/json
@@ -6,11 +6,11 @@ Content-Type: application/json
 {
   "serviceName": "{{serviceName}}",
   "token": "{{token}}",
-  "branch": "main",
-  "accounts": "acc-12,acc-20",
-  "ratePerSecond": 2,
-  "testCount": 10,
-  "processingTimeMillis": 80000,
+  "branch": "hw-08",
+  "accounts": "acc-9",
+  "ratePerSecond": 100,
+  "testCount": 5000,
+  "processingTimeMillis": 20000,
   "onPremises": true
 }
 
