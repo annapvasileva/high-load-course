@@ -58,8 +58,8 @@ class PaymentRequestQueue(
         private const val QUANTILE_COLD_START_SIZE = 100
         private const val QUANTILE_COLD_START_AVERAGE_FACTOR = 1.2
 
-        private const val REQUEST_TIMEOUT_QUANTILE = 0.90
-        private const val REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR = 1.5
+        private const val REQUEST_TIMEOUT_QUANTILE = 0.95
+        private const val REQUEST_TIMEOUT_MIN_AVERAGE_FACTOR = 1.2
     }
 
     init {
